@@ -1,0 +1,11 @@
+.venv
+.env
+.git
+.gitignore
+__pycache__
+*.pyc
+asktheworld_v0_0.py
+asktheworld_v0_1.py
+CLAUDE.md
+SUMMARY.md
+.claude
