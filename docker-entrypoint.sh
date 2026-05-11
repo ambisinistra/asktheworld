@@ -24,6 +24,12 @@ fi
 echo "==> Ensuring model '$MODEL' is available (pull is a no-op if already cached)..."
 ollama pull "$MODEL"
 
-echo "==> Starting Flask web UI via gunicorn on 0.0.0.0:5000..."
+if [ -z "${NGROK_AUTH:-}" ]; then
+    echo "ERROR: NGROK_AUTH is not set."
+    echo "       Pass it at runtime, e.g. 'docker run --env-file .env ...' or '-e NGROK_AUTH=...'"
+    exit 1
+fi
+
+echo "==> Starting Flask web UI + ngrok tunnel (asktheworld.py)..."
 cd /app
-exec uv run gunicorn --bind 0.0.0.0:5000 --workers 1 --timeout 120 asktheworld:app
+exec uv run python asktheworld.py

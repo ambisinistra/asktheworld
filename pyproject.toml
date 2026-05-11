@@ -9,4 +9,5 @@ dependencies = [
     "ollama>=0.4",
     "flask>=3.0",
     "gunicorn>=21",
+    "pyngrok>=7",
 ]
