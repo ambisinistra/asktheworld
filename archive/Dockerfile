@@ -17,11 +17,10 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project
 
-COPY asktheworld.py ./
+COPY asktheworld_v0_2.py ./
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 VOLUME ["/root/.ollama"]
-EXPOSE 5000
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

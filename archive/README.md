@@ -10,7 +10,11 @@ ETHPrague hackathon proof-of-concept.
 2. For each usable poll (≥1 voter, results final), extracts the winning option.
 3. Builds a single system prompt that tells the LLM the community's chosen stance on each topic.
 4. Sends that system prompt + a user question to a local LLM via Ollama.
-5. The default entrypoint is a Flask web UI (`asktheworld_v0_3.py`) — open it in a browser, type a question, get an aligned answer. A CLI variant (`asktheworld_v0_2.py`) with a hardcoded test question is still around for debugging.
+
+The current script (`asktheworld_v0_2.py`) uses a hardcoded test question:
+> *"Should I use Zero-Knowledge proofs for my new privacy app?"*
+
+Edit `main()` in the script to change it.
 
 ## Quick start (Docker, recommended)
 
@@ -21,25 +25,13 @@ ETHPrague hackathon proof-of-concept.
 docker build -t asktheworld .
 
 # Run with GPU
-docker run --rm --gpus all -p 5000:5000 -v ollama-models:/root/.ollama asktheworld
+docker run --rm --gpus all -v ollama-models:/root/.ollama asktheworld
 
 # Run without GPU (CPU fallback — much slower)
-docker run --rm           -p 5000:5000 -v ollama-models:/root/.ollama asktheworld
+docker run --rm -v ollama-models:/root/.ollama asktheworld
 ```
 
-Then open **http://localhost:5000** in a browser.
-
 The first container start downloads the 7.4 GB model into the named volume `ollama-models`. Later runs reuse it (seconds, not minutes).
-
-### Port forwarding
-
-Inside the container gunicorn listens on `0.0.0.0:5000`, but Docker doesn't publish container ports to the host by default — the `-p HOST:CONTAINER` flag does. Without it, the page is unreachable from your browser.
-
-- **Port 5000 is already busy on the host?** (Common on macOS, where AirPlay Receiver holds it.) Pick another host port: `-p 8080:5000`, then open http://localhost:8080.
-- **Bind to localhost only**, not all interfaces: `-p 127.0.0.1:5000:5000`.
-- **Verify the mapping is active**: `docker ps` should show `0.0.0.0:5000->5000/tcp` in the PORTS column.
-
-`EXPOSE 5000` in the Dockerfile is just documentation — it does not publish the port on its own.
 
 ## Quick start (without Docker)
 
@@ -50,10 +42,7 @@ Inside the container gunicorn listens on `0.0.0.0:5000`, but Docker doesn't publ
 ollama pull jaahas/qwen3.5-uncensored:9b
 uv sync
 
-# Run the web UI (recommended)
-uv run python asktheworld_v0_3.py     # → http://localhost:5000
-
-# Or run the CLI variant with the hardcoded test question
+# Run
 uv run python asktheworld_v0_2.py
 ```
 
@@ -75,8 +64,7 @@ docker run --rm -v ollama-models:/root/.ollama \
 
 | File | Purpose |
 |---|---|
-| `asktheworld_v0_3.py` | **Main entrypoint** — Flask web UI on top of v0_2 (served by gunicorn in Docker) |
-| `asktheworld_v0_2.py` | Ollama CLI version — also imported by v0_3 for the poll-fetching helpers |
+| `asktheworld_v0_2.py` | **Main script** — Ollama version |
 | `asktheworld_v0_1.py` | Older OpenAI GPT-4 Turbo version (needs `OPENAI_API_KEY` in `.env`) |
 | `asktheworld_v0_0.py` | Original Colab notebook, read-only reference |
 | `Dockerfile` + `docker-entrypoint.sh` | Container packaging (pull-on-start pattern) |
@@ -90,5 +78,4 @@ docker run --rm -v ollama-models:/root/.ollama \
 - The Docker image base is `ollama/ollama:latest`, which already includes CUDA libs. The same image runs on CPU and GPU — only the `docker run` command differs (`--gpus all`).
 - Ollama auto-detects available hardware. No code changes needed when switching between CPU and GPU.
 - macOS users: Apple Silicon GPU **cannot** be passed into Docker containers. Mac Docker runs are always CPU.
-- The container is a long-running web service: each `docker run` starts the Ollama daemon, ensures the model is available, then serves the Flask UI on port 5000 via gunicorn until stopped (Ctrl+C or `docker stop`).
-- Polls and the system prompt are fetched **once at startup** and cached in memory. To pick up new poll results, restart the container.
+- The script is a one-shot CLI: each `docker run` starts the daemon, ensures the model is available, runs the script once, and exits.

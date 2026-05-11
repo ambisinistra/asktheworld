@@ -1,104 +1,32 @@
 import os
-import requests
 import ollama
+from flask import Flask, request, render_template_string
 from dotenv import load_dotenv
+
+from asktheworld_v0_2 import (
+    fetch_all_process_ids,
+    fetch_process,
+    is_usable,
+    parse_poll,
+    build_system_prompt,
+    ask,
+    DEFAULT_MODEL,
+)
 
 load_dotenv()
 
-SEQUENCER_URL = "https://sequencer4.davinci.vote"
-MIN_VOTERS = 1
-DEFAULT_MODEL = "jaahas/qwen3.5-uncensored:9b"
+app = Flask(__name__)
+
+_state = {
+    "client": None,
+    "model": None,
+    "polls": [],
+    "system_prompt": "",
+    "error": None,
+}
 
 
-def fetch_all_process_ids():
-    response = requests.get(f"{SEQUENCER_URL}/processes")
-    response.raise_for_status()
-    return response.json()["processes"]
-
-
-def fetch_process(process_id):
-    response = requests.get(f"{SEQUENCER_URL}/processes/{process_id}")
-    response.raise_for_status()
-    return response.json()
-
-
-def fetch_metadata(metadata_uri):
-    response = requests.get(metadata_uri)
-    response.raise_for_status()
-    return response.json()
-
-
-def is_usable(process):
-    voters = int(process.get("votersCount", 0))
-    result = process.get("result")
-    accepting = process.get("isAcceptingVotes", True)
-    return voters >= MIN_VOTERS and result is not None and not accepting
-
-
-def parse_poll(process):
-    metadata = fetch_metadata(process["metadataURI"])
-    question = metadata["title"]["default"]
-    choices = [c["title"]["default"] for c in metadata["questions"][0]["choices"]]
-
-    result = [int(x) for x in process["result"]]
-    total_votes = int(process["votersCount"])
-
-    winning_index = result.index(max(result))
-    winning_choice = choices[winning_index]
-    winning_votes = result[winning_index]
-    agreement_rate = winning_votes / total_votes if total_votes > 0 else 0
-
-    return {
-        "question": question,
-        "chosen": winning_choice,
-        "total_votes": total_votes,
-        "agreement_rate": agreement_rate,
-        "process_id": process["id"],
-    }
-
-
-def build_system_prompt(polls):
-    stances = []
-    for poll in polls:
-        agreement_pct = poll["agreement_rate"] * 100
-        voters = poll["total_votes"]
-        stances.append(
-            f'- "{poll["question"]}": the community chose "{poll["chosen"]}" '
-            f"({agreement_pct:.0f}% agreement, {voters} voter{'s' if voters != 1 else ''})"
-        )
-
-    stances_text = "\n".join(stances)
-
-    return (
-        "You are a community-aligned AI. Your stances on the following topics are determined "
-        "by on-chain democratic consensus — real people voted on these questions using a "
-        "decentralized voting protocol, and you must reflect their collective will.\n\n"
-        "Community stances:\n"
-        f"{stances_text}\n\n"
-        "When any of these topics comes up, align your response with the community's chosen position. "
-        "If a topic is not covered above, respond based on your own judgment."
-    )
-
-
-def ask(client, model, system_prompt, user_question):
-    response = client.chat(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_question},
-        ],
-        options={"temperature": 0.7},
-    )
-    return response["message"]["content"]
-
-
-def print_section(title):
-    print(f"\n{'=' * 60}")
-    print(f"  {title}")
-    print('=' * 60)
-
-
-def main():
+def initialize():
     model = os.environ.get("OLLAMA_MODEL", DEFAULT_MODEL)
     host = os.environ.get("OLLAMA_HOST")
     client = ollama.Client(host=host) if host else ollama.Client()
@@ -106,54 +34,125 @@ def main():
     try:
         available = [m["model"] for m in client.list()["models"]]
     except Exception as e:
-        print(f"Error: cannot reach Ollama daemon ({e}).")
-        print("Make sure `ollama serve` is running, or set OLLAMA_HOST.")
+        _state["error"] = (
+            f"Cannot reach Ollama daemon: {e}. "
+            "Make sure `ollama serve` is running, or set OLLAMA_HOST."
+        )
         return
 
     if model not in available:
-        print(f"Error: model '{model}' is not pulled locally.")
-        print(f"Available models: {available}")
-        print(f"Pull with: ollama pull {model}")
+        _state["error"] = (
+            f"Model '{model}' is not pulled locally. "
+            f"Available: {available}. Pull with: ollama pull {model}"
+        )
         return
-    print(f"Using Ollama model: {model}")
 
-    print_section("FETCHING POLLS")
     process_ids = fetch_all_process_ids()
-    print(f"Found {len(process_ids)} processes total.\n")
-
     polls = []
-    skipped = []
     for pid in process_ids:
         process = fetch_process(pid)
-        if not is_usable(process):
-            skipped.append(pid)
-            print(f"  [ skip ] ...{pid[-8:]} — no votes or still open")
-            continue
-        poll = parse_poll(process)
-        polls.append(poll)
-        print(f"  [  ok  ] ...{pid[-8:]} — \"{poll['question']}\"")
+        if is_usable(process):
+            polls.append(parse_poll(process))
 
-    print_section("POLL DATA USED")
     if not polls:
-        print("No usable polls found. Exiting.")
+        _state["error"] = "No usable polls found on the sequencer."
         return
 
-    for i, poll in enumerate(polls, 1):
-        print(f"\n  [{i}] {poll['question']}")
-        print(f"       Chosen:     {poll['chosen']}")
-        print(f"       Agreement:  {poll['agreement_rate'] * 100:.0f}%")
-        print(f"       Voters:     {poll['total_votes']}")
-        print(f"       Process ID: {poll['process_id']}")
+    _state["client"] = client
+    _state["model"] = model
+    _state["polls"] = polls
+    _state["system_prompt"] = build_system_prompt(polls)
 
-    print_section("GENERATED SYSTEM PROMPT")
-    system_prompt = build_system_prompt(polls)
-    print(system_prompt)
 
-    print_section("AI RESPONSE")
-    user_question = "Should I use Zero-Knowledge proofs for my new privacy app?"
-    print(f"User: {user_question}\n")
-    print(ask(client, model, system_prompt, user_question))
+PAGE = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AskTheWorld</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+           max-width: 720px; margin: 2em auto; padding: 0 1em; color: #222; }
+    h1 { margin-bottom: 0.1em; }
+    .sub { color: #666; margin-top: 0; }
+    form { margin: 1.5em 0; display: flex; gap: 0.5em; }
+    input[type=text] { flex: 1; padding: 0.6em; font-size: 1em;
+                       border: 1px solid #ccc; border-radius: 4px; }
+    button { padding: 0.6em 1.2em; font-size: 1em; cursor: pointer;
+             background: #4a90e2; color: white; border: none; border-radius: 4px; }
+    button:hover { background: #357ab8; }
+    .qa { margin: 1.5em 0; }
+    .question { font-weight: 600; margin-bottom: 0.5em; }
+    .answer { background: #f4f4f4; padding: 1em; border-left: 3px solid #4a90e2;
+              white-space: pre-wrap; border-radius: 0 4px 4px 0; }
+    details { margin-top: 2em; color: #555; }
+    summary { cursor: pointer; padding: 0.4em 0; }
+    pre { white-space: pre-wrap; background: #fafafa; padding: 1em;
+          border: 1px solid #eee; border-radius: 4px; font-size: 0.9em; }
+    .error { color: #900; padding: 1em; border: 1px solid #c66;
+             background: #fee; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>AskTheWorld</h1>
+  <p class="sub">An AI whose stances are decided by on-chain community votes (davinci.vote)</p>
+
+  {% if error %}
+    <div class="error">{{ error }}</div>
+  {% else %}
+    <form method="post">
+      <input type="text" name="question" placeholder="Ask anything..."
+             value="{{ question or '' }}" autofocus required>
+      <button type="submit">Ask</button>
+    </form>
+
+    {% if answer %}
+      <div class="qa">
+        <div class="question">You asked: {{ question }}</div>
+        <div class="answer">{{ answer }}</div>
+      </div>
+    {% endif %}
+
+    <details>
+      <summary>Community stances used ({{ polls|length }} polls — model: {{ model }})</summary>
+      <pre>{{ system_prompt }}</pre>
+    </details>
+  {% endif %}
+</body>
+</html>
+"""
+
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    if _state["error"]:
+        return render_template_string(PAGE, error=_state["error"])
+
+    question = None
+    answer = None
+    if request.method == "POST":
+        question = request.form.get("question", "").strip()
+        if question:
+            answer = ask(
+                _state["client"],
+                _state["model"],
+                _state["system_prompt"],
+                question,
+            )
+
+    return render_template_string(
+        PAGE,
+        error=None,
+        question=question,
+        answer=answer,
+        polls=_state["polls"],
+        system_prompt=_state["system_prompt"],
+        model=_state["model"],
+    )
+
+
+initialize()
 
 
 if __name__ == "__main__":
-    main()
+    app.run(host="0.0.0.0", port=5000)

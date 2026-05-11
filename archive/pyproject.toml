@@ -7,6 +7,4 @@ dependencies = [
     "openai>=1.75",
     "python-dotenv>=1.0",
     "ollama>=0.4",
-    "flask>=3.0",
-    "gunicorn>=21",
 ]
