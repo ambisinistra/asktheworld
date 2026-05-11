@@ -4,6 +4,7 @@ import sys
 
 from pyngrok import ngrok, conf
 
+# Импортируем приложение из локальной версии
 from asktheworld_without_ngrok import app, _state
 
 PORT = int(os.environ.get("PORT", 5000))
@@ -12,11 +13,13 @@ PORT = int(os.environ.get("PORT", 5000))
 def start_ngrok_tunnel():
     auth_token = os.environ.get("NGROK_AUTH")
     if not auth_token:
-        print(
-            "ERROR: NGROK_AUTH not set. Add it to .env or export it before running.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        print()
+        print("=" * 60)
+        print("  WARNING: NGROK_AUTH is not set.")
+        print(f"  Starting local version ONLY at: http://localhost:{PORT}")
+        print("=" * 60)
+        print()
+        return None
 
     conf.get_default().auth_token = auth_token
     tunnel = ngrok.connect(PORT, "http")

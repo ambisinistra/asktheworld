@@ -3,7 +3,7 @@ import ollama
 from flask import Flask, request, render_template_string
 from dotenv import load_dotenv
 
-from asktheworld_v0_2 import (
+from asktheworld_cli import (
     fetch_all_process_ids,
     fetch_process,
     is_usable,
