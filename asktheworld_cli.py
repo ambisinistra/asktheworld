@@ -77,20 +77,55 @@ def build_system_prompt(polls):
         f"{stances_text}\n\n"
         "When any of these topics comes up, align your response with the community's chosen position. "
         "If a topic is not covered above, respond based on your own judgment."
-        "DON'T THINK! ANSWER NOW!"
     )
 
 
-def ask(client, model, system_prompt, user_question):
-    response = client.chat(
+def ask_stream(client, model, system_prompt, user_question):
+    """Yields (kind, text) chunks where kind is 'thinking' or 'content'."""
+    stream = client.chat(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_question},
         ],
         options={"temperature": 0.7},
+        think=True,
+        stream=True,
     )
-    return response["message"]["content"]
+    for chunk in stream:
+        msg = chunk.get("message", {}) if isinstance(chunk, dict) else getattr(chunk, "message", None)
+        if msg is None:
+            continue
+        thinking = msg.get("thinking") if isinstance(msg, dict) else getattr(msg, "thinking", None)
+        content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+        if thinking:
+            yield ("thinking", thinking)
+        if content:
+            yield ("content", content)
+
+
+def ask(client, model, system_prompt, user_question):
+    """CLI helper: prints thinking dimmed, then the answer; returns the final answer text."""
+    DIM = "\033[2;37m"
+    RESET = "\033[0m"
+    answer_parts = []
+    section = None
+    for kind, text in ask_stream(client, model, system_prompt, user_question):
+        if kind != section:
+            if section == "thinking":
+                print(RESET, end="", flush=True)
+            if kind == "thinking":
+                print(f"\n{DIM}[thinking] ", end="", flush=True)
+            elif kind == "content":
+                print("\n[answer] ", end="", flush=True)
+            section = kind
+        print(text, end="", flush=True)
+        if kind == "content":
+            answer_parts.append(text)
+    if section == "thinking":
+        print(RESET, end="", flush=True)
+    print()
+    return "".join(answer_parts)
 
 
 def print_section(title):

@@ -1,6 +1,7 @@
+import json
 import os
 import ollama
-from flask import Flask, request, render_template_string
+from flask import Flask, Response, request, render_template_string, stream_with_context
 from dotenv import load_dotenv
 
 from asktheworld_cli import (
@@ -9,7 +10,7 @@ from asktheworld_cli import (
     is_usable,
     parse_poll,
     build_system_prompt,
-    ask,
+    ask_stream,
     DEFAULT_MODEL,
 )
 
@@ -81,16 +82,30 @@ PAGE = """
     button { padding: 0.6em 1.2em; font-size: 1em; cursor: pointer;
              background: #4a90e2; color: white; border: none; border-radius: 4px; }
     button:hover { background: #357ab8; }
+    button[disabled] { background: #aaa; cursor: not-allowed; }
     .qa { margin: 1.5em 0; }
     .question { font-weight: 600; margin-bottom: 0.5em; }
+    .thinking { background: #fafaf2; padding: 1em; border-left: 3px solid #c9a227;
+                white-space: pre-wrap; border-radius: 0 4px 4px 0;
+                color: #6b5d1f; font-style: italic; font-size: 0.92em;
+                margin-bottom: 0.75em; }
+    .thinking-label { display: block; font-weight: 600; font-style: normal;
+                      color: #8a7a2c; margin-bottom: 0.4em; font-size: 0.85em;
+                      letter-spacing: 0.05em; text-transform: uppercase; }
     .answer { background: #f4f4f4; padding: 1em; border-left: 3px solid #4a90e2;
               white-space: pre-wrap; border-radius: 0 4px 4px 0; }
+    .answer-label { display: block; font-weight: 600; color: #2a6fc4;
+                    margin-bottom: 0.4em; font-size: 0.85em;
+                    letter-spacing: 0.05em; text-transform: uppercase; }
     details { margin-top: 2em; color: #555; }
     summary { cursor: pointer; padding: 0.4em 0; }
     pre { white-space: pre-wrap; background: #fafafa; padding: 1em;
           border: 1px solid #eee; border-radius: 4px; font-size: 0.9em; }
     .error { color: #900; padding: 1em; border: 1px solid #c66;
              background: #fee; border-radius: 4px; }
+    .cursor::after { content: "▍"; animation: blink 1s steps(2) infinite;
+                     color: #888; margin-left: 1px; }
+    @keyframes blink { 50% { opacity: 0; } }
   </style>
 </head>
 <body>
@@ -100,54 +115,176 @@ PAGE = """
   {% if error %}
     <div class="error">{{ error }}</div>
   {% else %}
-    <form method="post">
-      <input type="text" name="question" placeholder="Ask anything..."
-             value="{{ question or '' }}" autofocus required>
-      <button type="submit">Ask</button>
+    <form id="ask-form">
+      <input id="question" type="text" name="question" placeholder="Ask anything..."
+             autofocus required autocomplete="off">
+      <button id="submit-btn" type="submit">Ask</button>
     </form>
 
-    {% if answer %}
-      <div class="qa">
-        <div class="question">You asked: {{ question }}</div>
-        <div class="answer">{{ answer }}</div>
+    <div id="qa" class="qa" style="display: none;">
+      <div id="question-display" class="question"></div>
+      <div id="thinking-block" style="display: none;">
+        <span class="thinking-label">Thinking…</span>
+        <div id="thinking" class="thinking"></div>
       </div>
-    {% endif %}
+      <div id="answer-block" style="display: none;">
+        <span class="answer-label">Answer</span>
+        <div id="answer" class="answer"></div>
+      </div>
+    </div>
 
     <details>
       <summary>Community stances used ({{ polls|length }} polls — model: {{ model }})</summary>
       <pre>{{ system_prompt }}</pre>
     </details>
+
+    <script>
+      const form = document.getElementById('ask-form');
+      const input = document.getElementById('question');
+      const btn = document.getElementById('submit-btn');
+      const qa = document.getElementById('qa');
+      const questionDisplay = document.getElementById('question-display');
+      const thinkingBlock = document.getElementById('thinking-block');
+      const thinkingEl = document.getElementById('thinking');
+      const answerBlock = document.getElementById('answer-block');
+      const answerEl = document.getElementById('answer');
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const question = input.value.trim();
+        if (!question) return;
+
+        btn.disabled = true;
+        qa.style.display = 'block';
+        questionDisplay.textContent = 'You asked: ' + question;
+        thinkingBlock.style.display = 'none';
+        thinkingEl.textContent = '';
+        thinkingEl.classList.remove('cursor');
+        answerBlock.style.display = 'none';
+        answerEl.textContent = '';
+        answerEl.classList.remove('cursor');
+
+        try {
+          const resp = await fetch('/ask', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question }),
+          });
+          if (!resp.ok || !resp.body) {
+            answerBlock.style.display = 'block';
+            answerEl.textContent = 'Request failed: ' + resp.status;
+            return;
+          }
+
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          let activeEl = null;
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+
+            let sep;
+            while ((sep = buf.indexOf('\\n\\n')) !== -1) {
+              const event = buf.slice(0, sep);
+              buf = buf.slice(sep + 2);
+
+              const dataLines = event.split('\\n')
+                .filter(l => l.startsWith('data: '))
+                .map(l => l.slice(6));
+              if (!dataLines.length) continue;
+
+              let payload;
+              try { payload = JSON.parse(dataLines.join('\\n')); }
+              catch { continue; }
+
+              if (payload.kind === 'thinking') {
+                if (thinkingBlock.style.display === 'none') {
+                  thinkingBlock.style.display = 'block';
+                  thinkingEl.classList.add('cursor');
+                }
+                if (activeEl && activeEl !== thinkingEl) activeEl.classList.remove('cursor');
+                activeEl = thinkingEl;
+                thinkingEl.textContent += payload.text;
+              } else if (payload.kind === 'content') {
+                if (answerBlock.style.display === 'none') {
+                  answerBlock.style.display = 'block';
+                  answerEl.classList.add('cursor');
+                }
+                if (activeEl && activeEl !== answerEl) activeEl.classList.remove('cursor');
+                activeEl = answerEl;
+                answerEl.textContent += payload.text;
+              } else if (payload.kind === 'error') {
+                answerBlock.style.display = 'block';
+                answerEl.textContent = 'Error: ' + payload.text;
+              } else if (payload.kind === 'done') {
+                if (activeEl) activeEl.classList.remove('cursor');
+              }
+            }
+          }
+          if (activeEl) activeEl.classList.remove('cursor');
+        } catch (err) {
+          answerBlock.style.display = 'block';
+          answerEl.textContent = 'Error: ' + err.message;
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    </script>
   {% endif %}
 </body>
 </html>
 """
 
 
-@app.route("/", methods=["GET", "POST"])
+@app.route("/", methods=["GET"])
 def index():
     if _state["error"]:
         return render_template_string(PAGE, error=_state["error"])
+    return render_template_string(
+        PAGE,
+        error=None,
+        polls=_state["polls"],
+        system_prompt=_state["system_prompt"],
+        model=_state["model"],
+    )
 
-    question = None
-    answer = None
-    if request.method == "POST":
-        question = request.form.get("question", "").strip()
-        if question:
-            answer = ask(
+
+@app.route("/ask", methods=["POST"])
+def ask_endpoint():
+    if _state["error"]:
+        return Response(
+            f'data: {json.dumps({"kind": "error", "text": _state["error"]})}\n\n',
+            mimetype="text/event-stream",
+        )
+
+    payload = request.get_json(silent=True) or {}
+    question = (payload.get("question") or "").strip()
+    if not question:
+        return Response(
+            f'data: {json.dumps({"kind": "error", "text": "empty question"})}\n\n',
+            mimetype="text/event-stream",
+        )
+
+    def generate():
+        try:
+            for kind, text in ask_stream(
                 _state["client"],
                 _state["model"],
                 _state["system_prompt"],
                 question,
-            )
+            ):
+                yield f"data: {json.dumps({'kind': kind, 'text': text})}\n\n"
+            yield f"data: {json.dumps({'kind': 'done'})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'kind': 'error', 'text': str(e)})}\n\n"
 
-    return render_template_string(
-        PAGE,
-        error=None,
-        question=question,
-        answer=answer,
-        polls=_state["polls"],
-        system_prompt=_state["system_prompt"],
-        model=_state["model"],
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
