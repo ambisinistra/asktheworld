@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-MODEL="${OLLAMA_MODEL:-jaahas/qwen3.5-uncensored:9b}"
+MODEL="${OLLAMA_MODEL:-huihui_ai/granite4.1-abliterated:8b}"
 
 echo "==> Starting Ollama daemon..."
 ollama serve > /tmp/ollama.log 2>&1 &
